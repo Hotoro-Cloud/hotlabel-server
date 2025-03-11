@@ -3,6 +3,8 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Union
 import logging
+from datetime import datetime
+from pydantic import HttpUrl, BaseModel
 
 logger = logging.getLogger("hotlabel.redis")
 
@@ -21,6 +23,17 @@ KEY_STATS = "stats:"
 
 # Redis client singleton
 _redis_client = None
+
+# Custom JSON encoder to handle special types
+class HotLabelJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, HttpUrl):
+            return str(obj)
+        elif isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, BaseModel):
+            return obj.dict()
+        return super().default(obj)
 
 def get_redis_client() -> redis.Redis:
     """Get or create a Redis client instance"""
@@ -47,7 +60,7 @@ class RedisService:
     def store_json(self, key: str, data: Any, expiry: Optional[int] = None) -> bool:
         """Store JSON data in Redis"""
         try:
-            json_data = json.dumps(data)
+            json_data = json.dumps(data, cls=HotLabelJSONEncoder)
             self.redis.set(key, json_data)
             if expiry:
                 self.redis.expire(key, expiry)
@@ -70,7 +83,7 @@ class RedisService:
     def push_to_queue(self, queue_name: str, data: Any) -> bool:
         """Push data to a Redis list (queue)"""
         try:
-            json_data = json.dumps(data)
+            json_data = json.dumps(data, cls=HotLabelJSONEncoder)
             self.redis.lpush(queue_name, json_data)
             return True
         except Exception as e:

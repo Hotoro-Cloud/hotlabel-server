@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, Query, Path, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Body, Query, Path, BackgroundTasks, Request
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime, timedelta
 import uuid
+import json
 
 from app.models.task import TaskCreate, TaskInDB, TaskStatus, UserTaskMatch
 from app.models.user_profile import UserProfile, UserProfileUpdate
@@ -22,19 +23,26 @@ def get_user_service():
 
 @router.post("/", response_model=TaskInDB)
 async def create_task(
-    task: TaskCreate,
-    background_tasks: BackgroundTasks,
+    task: Dict[str, Any] = Body(...),
+    background_tasks: BackgroundTasks = None,
     task_service: TaskService = Depends(get_task_service)
 ):
     """
     Create a new task for labeling
     """
     try:
+        # Log the received task data for debugging
+        logger.debug(f"Received task data: {task}")
+        
+        # Create TaskCreate from dictionary
+        task_obj = TaskCreate(**task)
+        
         # Add task to the database
-        task_db = task_service.create_task(task)
+        task_db = task_service.create_task(task_obj)
         
         # Add to queue for processing (done in background)
-        background_tasks.add_task(task_service.queue_task, task_db)
+        if background_tasks:
+            background_tasks.add_task(task_service.queue_task, task_db)
         
         logger.info(f"Task created: {task_db.task_id}")
         return task_db
@@ -44,27 +52,34 @@ async def create_task(
 
 @router.post("/batch", response_model=Dict[str, Any])
 async def create_tasks_batch(
-    tasks: List[TaskCreate],
-    background_tasks: BackgroundTasks,
+    tasks: List[Dict[str, Any]] = Body(...),
+    background_tasks: BackgroundTasks = None,
     task_service: TaskService = Depends(get_task_service)
 ):
     """
     Create multiple tasks at once
     """
     try:
+        # Log the received tasks data for debugging
+        logger.debug(f"Received batch tasks data: {tasks}")
+        
         created_tasks = []
         failed_tasks = []
         
-        for task in tasks:
+        for task_data in tasks:
             try:
+                # Create TaskCreate from dictionary
+                task = TaskCreate(**task_data)
+                
                 # Add task to database
                 task_db = task_service.create_task(task)
                 created_tasks.append(task_db)
                 
                 # Queue for processing
-                background_tasks.add_task(task_service.queue_task, task_db)
+                if background_tasks:
+                    background_tasks.add_task(task_service.queue_task, task_db)
             except Exception as e:
-                failed_tasks.append({"task_id": task.task_id, "error": str(e)})
+                failed_tasks.append({"task_id": task_data.get("task_id"), "error": str(e)})
         
         logger.info(f"Batch created: {len(created_tasks)} tasks successful, {len(failed_tasks)} failed")
         return {
@@ -104,7 +119,7 @@ async def list_tasks(
 
 @router.post("/request", response_model=Optional[TaskInDB])
 async def request_task(
-    user_profile: UserProfileUpdate,
+    profile: Dict[str, Any] = Body(...),
     session_id: str = Query(..., description="User session ID"),
     task_service: TaskService = Depends(get_task_service),
     user_service: UserService = Depends(get_user_service)
@@ -112,17 +127,27 @@ async def request_task(
     """
     Request a task for the user based on their profile
     """
-    # Update user profile with latest data
-    profile = user_service.update_profile(session_id, user_profile)
-    
-    # Find a suitable task
-    task = task_service.find_task_for_user(profile)
-    if not task:
-        return None
-    
-    # Assign task to user
-    assigned_task = task_service.assign_task(task.task_id, session_id)
-    return assigned_task
+    try:
+        # Log the received profile data for debugging
+        logger.debug(f"Received profile data: {profile}")
+        
+        # Create UserProfileUpdate from dictionary
+        profile_update = UserProfileUpdate(**profile)
+        
+        # Update user profile with latest data
+        updated_profile = user_service.update_profile(session_id, profile_update)
+        
+        # Find a suitable task
+        task = task_service.find_task_for_user(updated_profile)
+        if not task:
+            return None
+        
+        # Assign task to user
+        assigned_task = task_service.assign_task(task.task_id, session_id)
+        return assigned_task
+    except Exception as e:
+        logger.error(f"Error requesting task: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to request task: {str(e)}")
 
 @router.post("/match", response_model=List[UserTaskMatch])
 async def match_tasks_to_user(
@@ -133,5 +158,9 @@ async def match_tasks_to_user(
     """
     Find tasks that match a user profile
     """
-    matches = task_service.match_tasks_to_user(user_profile, limit)
-    return matches
+    try:
+        matches = task_service.match_tasks_to_user(user_profile, limit)
+        return matches
+    except Exception as e:
+        logger.error(f"Error matching tasks to user: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to match tasks: {str(e)}")
