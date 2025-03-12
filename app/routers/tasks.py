@@ -21,7 +21,7 @@ def get_task_service():
 def get_user_service():
     return UserService(RedisService())
 
-@router.post("/", response_model=TaskInDB)
+@router.post("/", response_model=Dict[str, Any])
 async def create_task(
     task: Dict[str, Any] = Body(...),
     background_tasks: BackgroundTasks = None,
@@ -45,10 +45,56 @@ async def create_task(
             background_tasks.add_task(task_service.queue_task, task_db)
         
         logger.info(f"Task created: {task_db.task_id}")
-        return task_db
+        
+        # Return a more informative response
+        return {
+            "status": "success",
+            "message": "Task created successfully and queued for processing",
+            "task_id": task_db.task_id,
+            "task": task_db.dict(),
+            "queue_status": {
+                "in_queue": True,
+                "estimated_processing_time": "< 1 minute",
+                "priority": "normal"
+            },
+            "next_steps": {
+                "check_status": f"/tasks/{task_db.task_id}",
+                "view_responses": f"/tasks/{task_db.task_id}/responses",
+                "view_with_responses": f"/tasks/{task_db.task_id}/with-responses"
+            }
+        }
     except Exception as e:
         logger.error(f"Error creating task: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
+    
+@router.get("/{task_id}/with-responses", response_model=Dict[str, Any])
+async def get_task_with_responses(
+    task_id: str,
+    redis: RedisService = Depends(lambda: RedisService())
+):
+    """
+    Get a task along with all its responses
+    """
+    # Get the task
+    task = redis.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Find all responses for this task
+    response_keys = redis.redis.keys("response:*")
+    task_responses = []
+    
+    for key in response_keys:
+        response_data = redis.get_json(key)
+        if response_data and response_data.get("task_id") == task_id:
+            task_responses.append(response_data)
+    
+    # Return combined data
+    return {
+        "task": task,
+        "responses": task_responses,
+        "response_count": len(task_responses)
+    }
 
 @router.post("/batch", response_model=Dict[str, Any])
 async def create_tasks_batch(
